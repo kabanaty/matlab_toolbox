@@ -10,7 +10,8 @@ function varargout = wirescan_gui(varargin)
 %      local
 %      function named CALLBACK in WIRESCAN_GUI.M with the given in put arguments.
 %
-%      WIRESCAN_GUI('Property','Value',...) creates a new WIRESCAN_GUI or raises the
+%      WIRESCAN_GUI('Property','Value',...) creates a new WIRESCAN_GUI or
+%      raises the
 %      existing singleton*.  Starting from the left, property value pairs are
 %      applied to the GUI before wirescan_gui_OpeningFunction gets called.  An
 %      unrecognized property name or invalid value makes property application
@@ -816,8 +817,12 @@ handles = gui_indexControl(hObject, handles, []);
 
 % ------------------------------------------------------------------------
 function handles = sectorControl(hObject, handles, name)
-% sectorControl - Manages the GUI behavior when the user selects different sectors
-%                 of the particle accelerator.
+% sectorControl - Initializes and configures the GUI for the selected sector.
+%
+% This function updates the model source control for the current beam path,
+% manages radio button selections for sector choices, and adjusts Event Receiver 
+% outputs based on the specified sector name. It also populates the GUI with 
+% relevant device lists and initializes wire scan settings for the chosen sector.
 
 % Initialize the model source control for the current beam path.
 gui_modelSourceControl(hObject, handles, [], handles.beampath);
@@ -874,7 +879,11 @@ set(handles.printLog_btn, 'String', '-> Log Book');
 
 % ------------------------------------------------------------------------
 function [sector, wireId] = scanWireFind(hObject, handles, wireName)
-% Finds the sector and wire ID corresponding to a given wire name.
+% scanWireFind - Locate the sector and wire ID based on the wire name.
+%
+% This function searches through all sectors in the provided handles
+% structure to find a wire corresponding to the specified wire name.
+% It returns the sector name and the wire ID if the wire is found.
 
 % Convert the wire name to the proper format.
 wireName = model_nameConvert(wireName);
@@ -903,6 +912,14 @@ end
 
 % ------------------------------------------------------------------------
 function handles = scanWireInit(hObject, handles, wireId)
+% scanWireInit - Initializes the wire scan setup for the selected sector.
+%
+% This function loads the necessary constants for wire scanning and initializes
+% the parameters for the selected wire. It retrieves the current sector data,
+% updates the GUI controls, and checks if the selected wire is part of Fast Wire 
+% Scanners (FWS) or a Beam Offset Device (BOD). The function also configures 
+% BPM, Toroid, and PMT controls based on the selected wire, and updates the 
+% scan status message.
 
 % Load wire scan constants (e.g., error messages).
 wirescan_const;
@@ -948,7 +965,7 @@ try
           ... % LTUH
           'WIRE:LTUH:715' 'WIRE:LTUH:735' 'WIRE:LTUH:755' ...
           'WIRE:LTUH:775' 'WIRE:LTUH:122' 'WIRE:LTUH:246' ...
-          ... % LTUS 06/Aug/20, BTJ added PVs for WS31b-WS34B
+          ... % LTUS 
           'WIRE:LTUS:715' 'WIRE:LTUS:735' 'WIRE:LTUS:755' ...
           'WIRE:LTUS:785' ...
         });  
@@ -1779,6 +1796,7 @@ data.wireMode = handles.scanWireMode; % Set wire scan mode.
 data.wireName = handles.scanWireName; % Wire name (redundant for clarity).
 data.wireDir = handles.scanWireDir; % Wire scan direction.
 data.wireLimit = handles.scanWireLimit; % Wire scan limits.
+data.wireData = []; % Initialize empty vector for wire position data
 
 % Define the list of process variables (PVs) to read for wire scanner.
 pvList = strcat(data.wireName, ':', [{'INSTALLANGLE' 'SCANTOCENTER'} ...
@@ -1825,6 +1843,7 @@ end
 
 % ------------------------------------------------------------------------
 function data = scanReadBSAData(hObject, handles, data, j, num)
+'scan read bsa data running'
 % Reads beam synchronous acquisition (BSA) or eDef data and related parameters.
 
 if nargin < 4
@@ -1844,7 +1863,7 @@ end
 
 % Define pulse ID process variable (PV) for eDef.
 pulseIdPV = sprintf('PATT:%s:1:PULSEIDHST%s', handles.system, eDefNumStr);
-
+scanReadData(hObject, handles, data);
 if nargin < 5
     % Get the number of pulses to read, depending on the system used.
     if (strcmp(handles.accelerator, 'LCLS') && strcmp(handles.index(1:2), 'SC'))
@@ -1863,7 +1882,8 @@ if strcmp(handles.sectorSel, 'UNDH')
 end
 
 % Read wire scanner data for the specified number of pulses.
-[data.wireData(1, :, j), ts] = lcaGetSmart(pvList, num); % Retrieve wire data.
+
+[data.wireData(1, :, j), ts] = lcaGetSmart(pvList, num); % Retrieve wire data. data.wireData print
 
 % Convert EPICS timestamp to MATLAB time.
 if ~epicsSimul_status
@@ -2254,9 +2274,10 @@ sector = handles.sector.(handles.sectorSel);
 [tag, dirId] = scanWireCurrentDir(hObject, handles); % Get current wire direction
 wireId = handles.scanWireId;
 data = sector.data(wireId,dirId);
+data.selectPMT = sector.processPMTUsed(wireId);
 
 % Check if data has been processed; if not, plot and exit
-if ~any(data.status) % Removed square brackets around [data.status] TK 10/23/2024
+if ~any([data.status]) % Removed square brackets around [data.status] TK 10/23/2024
     processPlot(hObject,handles)
     return
 end
@@ -2264,7 +2285,7 @@ end
 % Process data based on the wire mode
 switch data.wireMode
     case {'wire' 'step' 'orbit'}
-        data = doWireProcess(hObject, handles, data); % Process wire data
+        data = doWireProcess(hObject, handles, data) % Process wire data
     case 'corr'
         data = doCorrProcess(hObject, handles, data); % Process corrector data
 end
@@ -2337,84 +2358,116 @@ for tag = 'xyu'
         profs.(tag) = [pos;signal]; % Store position and signal data
     end
 end
+
 % Analyze beam profile
 data.beam = beamAnalysis_beamParams(profs, [], [], 0, 'isimage', 0, 'fitbg', 1); 
 
 
 % ------------------------------------------------------------------------
 function handles = plotInit(hObject, handles)
+% Initialize the plot settings for the wire scan data.
 % Left hand plot initialization?
 
-ax = handles.plotRaw_ax;
-col = get(ax,'ColorOrder');
-handles.plotScan.wire = line(NaN, NaN, 'Parent', ax, 'Color', 'k', 'LineStyle', ':');
-handles.plotScan.wireMasked = line(NaN, NaN, 'Parent', ax, 'Color', 'k');
+ax = handles.plotRaw_ax; % Get the axes for plotting
+col = get(ax,'ColorOrder'); % Retrieve the color order for the lines
+
+% Create lines for the wire scan data
+handles.plotScan.wire = line(NaN, NaN, 'Parent', ax, 'Color', 'k', 'LineStyle', ':'); % Wire line (dotted)
+handles.plotScan.wireMasked = line(NaN, NaN, 'Parent', ax, 'Color', 'k'); % Masked wire line
+
+% Initialize lines for PMT, BPMX, BPMY, and toroid data
 for j = 1:40
-    props = {'Parent', ax, 'Color', col(mod(j - 1, 7) + 1, :)};
-    handles.plotScan.PMT(j) = line(NaN, NaN, props{:}, 'LineStyle', '-');
-    handles.plotScan.BPMX(j) = line(NaN, NaN, props{:}, 'LineStyle', ':');
-    handles.plotScan.BPMY(j) = line(NaN, NaN, props{:}, 'LineStyle', '-.');
-    handles.plotScan.toro(j) = line(NaN, NaN, props{:}, 'LineStyle', '--');
+    props = {'Parent', ax, 'Color', col(mod(j - 1, 7) + 1, :)}; % Set properties including color
+    handles.plotScan.PMT(j) = line(NaN, NaN, props{:}, 'LineStyle', '-'); % PMT line (solid)
+    handles.plotScan.BPMX(j) = line(NaN, NaN, props{:}, 'LineStyle', ':'); % BPMX line (dotted)
+    handles.plotScan.BPMY(j) = line(NaN, NaN, props{:}, 'LineStyle', '-.'); % BPMY line (dash-dot)
+    handles.plotScan.toro(j) = line(NaN, NaN, props{:}, 'LineStyle', '--'); % Toroid line (dashed)
 end
+
+% Initialize text label for the plot
 handles.plotScan.txt = text(0.1, 0.9, '', 'units', 'normalized', 'Parent', ax, ...
-    'VerticalAlignment', 'top');
+    'VerticalAlignment', 'top');% Initialize text label for the plot
+
+% Set axis labels
 xlabel(ax, 'Scan Point');
 ylabel(ax, 'Wire Position  (mm)');
 
-handles.plotProcessLim = -1;
-guidata(hObject, handles);
+handles.plotProcessLim = -1; % Initialize plot process limits
+guidata(hObject, handles); % Update the handles structure
 
 
 % ------------------------------------------------------------------------
 function scanPlot(hObject, handles)
-% Do left hand plotting ???
-sector = handles.sector.(handles.sectorSel);
-[tag, dirId] = scanWireCurrentDir(hObject, handles);
-data = sector.data(handles.scanWireId, dirId);
-hList = findobj(handles.plotRaw_ax, 'Type', 'line');
-set(hList, 'XData', NaN, 'YData', NaN);
-set(findobj(handles.plotRaw_ax, 'Type', 'text'), 'String', '');
-if ~any([data.status])
-    return
+% Update the right-hand plot with the current scan data.
+
+sector = handles.sector.(handles.sectorSel); % Access the selected sector data
+[tag, dirId] = scanWireCurrentDir(hObject, handles); % Get current scan direction
+data = sector.data(handles.scanWireId, dirId); % Retrieve data for the current wire ID
+
+% Clear previous plot data
+hList = findobj(handles.plotRaw_ax, 'Type', 'line'); % Find all line objects in the plot
+set(hList, 'XData', NaN, 'YData', NaN); % Reset X and Y data to NaN
+set(findobj(handles.plotRaw_ax, 'Type', 'text'), 'String', ''); % Clear text labels
+
+if ~any([data.status]) % Check if there is no valid data
+    return % Exit if no valid data is available
 end
 
-x = 1:length(data.wireData);
-y = data.wireData * 1e-3;
-set(handles.plotScan.wire, 'XData', x, 'YData', y);
-y(~data.wireMask) = NaN;
-set(handles.plotScan.wireMasked, 'XData', x, 'YData', y);
+x = 1:length(data.wireData); % X-axis data (scan points)
+y = data.wireData * 1e-3; % Convert wire data to mm for Y-axis
+
+% Update wire plot with data
+set(handles.plotScan.wire, 'XData', x, 'YData', y); % Set wire data points
+y(~data.wireMask) = NaN; % Mask invalid wire data
+set(handles.plotScan.wireMasked, 'XData', x, 'YData', y); % Update masked wire plot
+
+% Prepare display strings for plot legend
 str = {[data.wireName]};
-dispSel = handles.processDisplaySel;
+dispSel = handles.processDisplaySel; % Check display selection for PMT data
 
-iVal = 1:size(data.PMTData, 1);
+% Update PMT data plots
+iVal = 1:size(data.PMTData, 1); % Initialize index for PMT data
 if dispSel
-    iVal = sector.processPMTUsed(handles.scanWireId);
+    iVal = sector.processPMTUsed(handles.scanWireId); % Filter PMT indices based on selection
 end
+
 for j = iVal
-    if strcmp('TMITLOSS', data.PMTList(data.selectPMT))
-        set(handles.plotScan.PMT(j), 'XData', x, 'YData', data.PMTData(j, :) * 1e4);
-    else
-        set(handles.plotScan.PMT(j), 'XData', x, 'YData', data.PMTData(j, :) * 1e-2);
-    end
+    % Set PMT data with appropriate scaling
+%     if strcmp('TMITLOSS', data.PMTList(data.selectPMT))
+%         set(handles.plotScan.PMT(j), 'XData', x, 'YData', data.PMTData(j, :) * 1e4); % Scale for TMIT loss
+%     else
+    set(handles.plotScan.PMT(j), 'XData', x, 'YData', data.PMTData(j, :) * 1e-2); % Standard scaling
+%     end
+    % Append PMT data to the legend string
     str = [str {['\color[rgb]{' num2str(get(handles.plotScan.PMT(j), 'Color')) '}' data.PMTList{j}]}];
 end
-iVal = 1:size(data.BPMXData, 1);
+
+% Update BPMX and BPMY data plots
+iVal = 1:size(data.BPMXData, 1); % Initialize index for BPMX data
 if dispSel
-    iVal = find(sector.processBPMUsed(handles.scanWireId, :));
+    iVal = find(sector.processBPMUsed(handles.scanWireId, :)); % Filter BPM indices based on selection
 end
+
 for j = iVal
-    set(handles.plotScan.BPMX(j), 'XData', x, 'YData', data.BPMXData(j, :) * 10);
-    set(handles.plotScan.BPMY(j), 'XData', x, 'YData', data.BPMYData(j, :) * 10);
+    % Set BPMX and BPMY data with appropriate scaling
+    set(handles.plotScan.BPMX(j), 'XData', x, 'YData', data.BPMXData(j, :) * 10); % Scale BPMX data
+    set(handles.plotScan.BPMY(j), 'XData', x, 'YData', data.BPMYData(j, :) * 10); % Scale BPMY data
+    % Append BPM data to the legend string
     str = [str {['\color[rgb]{' num2str(get(handles.plotScan.BPMX(j), 'Color')) '}' data.BPMList{j}]}];
 end
-iVal = 1:size(data.toroData, 1);
+
+% Update Toroid data plots
+iVal = 1:size(data.toroData, 1); % Initialize index for Toroid data
 if dispSel
-    iVal = sector.processToroUsed(handles.scanWireId);
+    iVal = sector.processToroUsed(handles.scanWireId); % Filter Toroid indices based on selection
 end
 for j = iVal
-    set(handles.plotScan.toro(j), 'XData', x, 'YData', abs(data.toroData(j, :)) * 1e-8);
+    set(handles.plotScan.toro(j), 'XData', x, 'YData', abs(data.toroData(j, :)) * 1e-8); % Set Toroid data
+    % Append Toroid data to the legend string
     str = [str {['\color[rgb]{' num2str(get(handles.plotScan.toro(j), 'Color')) '}' data.toroList{j}]}];
 end
+
+% Update the plot legend with the collected strings
 set(handles.plotScan.txt, 'String', str);
 
 
@@ -2476,40 +2529,67 @@ end
         
 % ------------------------------------------------------------------------
 function [range, speedMOTR] = startFWS(hObject, handles, wireDir)
-%function for starting scan for FWS
+% Initiates a scan for the Fast Wire Scanner (FWS).
 
-countOld = lcaGetRetryCount;
-lcaSetRetryCount(60 / lcaGetTimeout);
+countOld = lcaGetRetryCount; % Get the current lcaGet retry count
+lcaSetRetryCount(60 / lcaGetTimeout); % Set a new retry count based on timeout
+
+% Check the speed and range for the wire scan
 [flag, speedMOTR, range] = scanWireSpeedCheck(hObject, handles);
-n = wireDir == 'xyu';
-speedMOTR = speedMOTR(n);  
-range = range(n);  
+
+% Determine which speed and range to use based on the wire direction
+n = wireDir == 'xyu'; % Create a logical index for 'x', 'y', 'u'
+speedMOTR = speedMOTR(n); % Select the speed for the given direction
+range = range(n); % Select the range for the given direction
+
+% Set the motor speed for the wire scanner
 lcaPutSmart([handles.scanWireName ':MOTR.VELO'], speedMOTR);
+
+% Retrieve the current scan direction
 scanDir = lcaGetSmart(strcat(handles.scanWireName, ':SCANTOCENTER'), 0, 'double');
-str = {'INNER' 'OUTER'};
-pv = strcat(handles.scanWireName, ':', upper(wireDir), 'WIRE', str{~scanDir + 1});
-val = lcaGetSmart(pv);  
+str = {'INNER' 'OUTER'}; % Define range PV suffixes
+pv = strcat(handles.scanWireName, ':', upper(wireDir), 'WIRE', str{~scanDir + 1}); % Construct PV name for wire ranges
+val = lcaGetSmart(pv); % Get the current range value for the wire
+
+% Attempt to set the motor position for the wire scanner
 try
-    lcaPutNoWait(strcat(handles.scanWireName, ':MOTR'), val);
+    lcaPutNoWait(strcat(handles.scanWireName, ':MOTR'), val); % Send the position command
 catch ex
+    % Log any exceptions encountered during motor position setting
     lprintf(STDERR, 'Ignoring exception setting motor position (MOTR) %s',...
         ex.message);
 end
+
+% Restore the original LCA retry count
 lcaSetRetryCount(countOld);
 
 
 % ------------------------------------------------------------------------
 function stopFWS(hObject, handles)
+% Stops the Fast Wire Scanner (FWS) by returning the motor to its lower limit
 
+% Construct the process variable (PV) string for the motor
 pv = strcat(handles.scanWireName, ':MOTR');
+
+% Retrieve the maximum speed of the motor
 vmax = lcaGetSmart(strcat(pv, '.VMAX'));
+
+% Set the motor speed to its maximum value
 lcaPutSmart(strcat(pv, '.VELO'), vmax);
-pause(1);
+
+% Pause for 0.5 seconds to allow speed change to take effect
+pause(.5);
+
+% Get the lower limit position of the motor
 val1 = lcaGetSmart(strcat(pv, '.LLM'));
+
+% Move the motor to the lower limit position without waiting for completion
 lcaPutNoWait(pv, val1);
+
+% Special handling for a specific wire scanner
 if strcmp(handles.scanWireName,'WIRE:LTUH:755')
-    pause(1.);
-    lcaPutNoWait(pv, val1);
+    pause(1.); % Pause for an additional second
+    lcaPutNoWait(pv, val1); % Move to the lower limit again
 end
 
 
